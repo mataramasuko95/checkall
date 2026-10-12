@@ -107,7 +107,7 @@ function render(){$('tabs').innerHTML=D?T.map(function(t,i){return '<button role
 $('out').innerHTML=D?T[cur][1]():'<div class="c"><p class="k">Paste a Solana token address above and press Analyze token.</p></div>';
 document.querySelectorAll('#tabs button').forEach(function(b){b.onclick=function(){cur=+b.dataset.i;render()}})}
 $('b1').onclick=function(){var v=$('ca').value.trim();if(!v){$('ca').focus();return}if(busy)return;busy=true;$('b1').textContent='Loading…';
-fetch('/api/token?ca='+encodeURIComponent(v)).then(function(r){return r.json()}).then(function(j){if(j.error){D=null;render();$('out').innerHTML='<div class="c bd">'+j.error+'</div>'}else{D=j;cur=0;render()}$('tabs').scrollIntoView({behavior:'smooth'})}).catch(function(){D=null;render();$('out').innerHTML='<div class="c bd">Could not reach the server. Try again.</div>'}).then(function(){busy=false;$('b1').textContent='Analyze token'})};
+fetch('/api/token?ca='+encodeURIComponent(v)).then(function(r){return r.text().then(function(t){var j;try{j=JSON.parse(t)}catch(e){throw new Error('Server answered '+r.status+': '+t.slice(0,150))}return j})}).then(function(j){if(j.error){D=null;render();$('out').innerHTML='<div class="c bd">'+j.error+'</div>'}else{D=j;cur=0;render()}$('tabs').scrollIntoView({behavior:'smooth'})}).catch(function(e){D=null;render();$('out').innerHTML='<div class="c bd">Error: '+((e&&e.message)||e)+'</div>'}).then(function(){busy=false;$('b1').textContent='Analyze token'})};
 $('b2').onclick=function(){if(!$('tw').value.trim()){$('tw').focus();return}if(!D){$('out').innerHTML=soon('Twitter profile check');return}cur=2;render()};
 render();
 </script></body></html>
