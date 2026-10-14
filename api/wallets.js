@@ -52,61 +52,67 @@ function handle(tx, mint, W) {
   });
 }
 
-function summarize(W, p) { // p: {solUsd, priceSol, supply}
-  const r2 = (n) => (n === null ? null : Math.round(n * 100) / 100);
-  return Object.values(W).filter(w => w.spent > 0 && (p.solUsd ? w.spent * p.solUsd >= MIN_USD : w.spent >= 0.03)).map(w => {
-    const remaining = Math.max(0, w.bought - w.sold + w.tin - w.tout);
-    const value = p.priceSol ? remaining * p.priceSol : 0;
-    const pnl = w.recv + value - w.spent;
-    const mc = (sol, tok) => (tok > 0 && p.supply && p.solUsd ? (sol / tok) * p.solUsd * p.supply : null);
-    return {
-      wallet: w.w, roi: r2(pnl / w.spent * 100), pnl: r2(pnl), spent: r2(w.spent), received: r2(w.recv),
-      entryMcap: r2(mc(w.spent, w.bought)), exitMcap: r2(mc(w.recv, w.sold)),
-      holding: remaining > w.bought * 0.01, buys: w.buys, sells: w.sells,
-      tin: w.tin > 0, tout: w.tout > 0
-    };
-  }).sort((a, b) => b.roi - a.roi).slice(0, 60);
+
+async function market(ca) {
+  const dex = await getJson('https://api.dexscreener.com/tokens/v1/solana/' + ca);
+  const tp = Array.isArray(dex) && dex.length ? dex.sort((a, b) => ((b.liquidity && b.liquidity.usd) || 0) - ((a.liquidity && a.liquidity.usd) || 0))[0] : null;
+  let solUsd = null;
+  if (tp && tp.quoteToken.address === WSOL && Number(tp.priceNative) > 0) solUsd = Number(tp.priceUsd) / Number(tp.priceNative);
+  if (!solUsd) {
+    const s = await getJson('https://api.dexscreener.com/tokens/v1/solana/' + WSOL);
+    const sp = Array.isArray(s) ? s.filter(x => x.baseToken.address === WSOL).sort((a, b) => ((b.liquidity && b.liquidity.usd) || 0) - ((a.liquidity && a.liquidity.usd) || 0))[0] : null;
+    if (sp) solUsd = Number(sp.priceUsd);
+  }
+  const sup = await rpc('getTokenSupply', [ca]).catch(() => null);
+  const supply = (sup && sup.value.uiAmount) || (tp && tp.marketCap && tp.priceUsd ? tp.marketCap / Number(tp.priceUsd) : null);
+  return { solUsd, supply, priceSol: tp && solUsd ? Number(tp.priceUsd) / solUsd : null };
+}
+
+async function enhanced(key, sigs) {
+  for (let t = 0; t < 3; t++) {
+    const r = await fetch('https://api.helius.xyz/v0/transactions?api-key=' + key, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transactions: sigs })
+    });
+    if (r.status === 429) { await new Promise(z => setTimeout(z, 1200)); continue; }
+    if (!r.ok) throw new Error('Helius answered ' + r.status + '. Check the API key and plan limits.');
+    return r.json();
+  }
+  throw new Error('Helius rate limit reached. Try again in a moment.');
 }
 
 module.exports = async (req, res) => {
-  const ca = String(req.query.ca || '').trim();
   const key = process.env.HELIUS_API_KEY;
-  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(ca)) return res.status(400).json({ error: 'Invalid token address.' });
   if (!key) return res.status(500).json({ error: 'HELIUS_API_KEY is not set in Vercel.' });
   try {
-    const dex = await getJson('https://api.dexscreener.com/tokens/v1/solana/' + ca);
-    const tp = Array.isArray(dex) && dex.length ? dex.sort((a, b) => ((b.liquidity && b.liquidity.usd) || 0) - ((a.liquidity && a.liquidity.usd) || 0))[0] : null;
-    let solUsd = null;
-    if (tp && tp.quoteToken.address === WSOL && Number(tp.priceNative) > 0) solUsd = Number(tp.priceUsd) / Number(tp.priceNative);
-    if (!solUsd) {
-      const s = await getJson('https://api.dexscreener.com/tokens/v1/solana/' + WSOL);
-      const sp = Array.isArray(s) ? s.filter(x => x.baseToken.address === WSOL).sort((a, b) => ((b.liquidity && b.liquidity.usd) || 0) - ((a.liquidity && a.liquidity.usd) || 0))[0] : null;
-      if (sp) solUsd = Number(sp.priceUsd);
-    }
-    const sup = await rpc('getTokenSupply', [ca]).catch(() => null);
-    const supply = (sup && sup.value.uiAmount) || (tp && tp.marketCap && tp.priceUsd ? tp.marketCap / Number(tp.priceUsd) : null);
-    const priceSol = tp && solUsd ? Number(tp.priceUsd) / solUsd : null;
-
-    const W = {};
-    let before = '', pages = 0, txRead = 0, done = false;
-    while (pages < MAX_PAGES) {
-      const r = await fetch('https://api.helius.xyz/v0/addresses/' + ca + '/transactions?api-key=' + key + '&limit=100' + (before ? '&before=' + before : ''));
-      if (!r.ok) {
-        if (!pages) return res.status(502).json({ error: 'Helius answered ' + r.status + '. Check the API key and plan limits.' });
-        break;
+    if (req.method === 'POST') { // parse one batch of signatures (max 300)
+      const b = req.body || {};
+      const sigs = Array.isArray(b.sigs) ? b.sigs.slice(0, 300) : [];
+      if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(b.ca || '')) || !sigs.length) return res.status(400).json({ error: 'Bad request.' });
+      const W = {};
+      for (let i = 0; i < sigs.length; i += 100) {
+        const txs = await enhanced(key, sigs.slice(i, i + 100));
+        (Array.isArray(txs) ? txs : []).forEach(tx => handle(tx, b.ca, W));
       }
-      const txs = await r.json();
-      if (!Array.isArray(txs) || !txs.length) { done = true; break; }
-      pages++; txRead += txs.length;
-      txs.forEach(tx => handle(tx, ca, W));
-      before = txs[txs.length - 1].signature;
-      if (txs.length < 100) { done = true; break; }
+      return res.status(200).json({ W });
     }
-    const rows = summarize(W, { solUsd, priceSol, supply });
-    res.status(200).json({ rows, meta: { txRead, truncated: !done, wallets: Object.keys(W).length, solUsd, hasPrice: !!priceSol, minUsd: MIN_USD } });
+    const ca = String(req.query.ca || '').trim(); // list all signatures, oldest first
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(ca)) return res.status(400).json({ error: 'Invalid token address.' });
+    const m = await market(ca);
+    let before, all = [], cutoff = false;
+    for (let i = 0; i < 30; i++) {
+      const r = await rpc('getSignaturesForAddress', [ca, Object.assign({ limit: 1000 }, before ? { before } : {})]);
+      if (!r.length) break;
+      r.forEach(x => { if (!x.err) all.push(x.signature); });
+      before = r[r.length - 1].signature;
+      if (r.length < 1000) break;
+      if (i === 29) cutoff = true;
+    }
+    all.reverse();
+    res.status(200).json({ sigs: all, cutoff, market: m });
   } catch (e) {
     res.status(500).json({ error: 'Something went wrong: ' + e.message });
   }
 };
 module.exports.handle = handle;
+
 module.exports.summarize = summarize;
