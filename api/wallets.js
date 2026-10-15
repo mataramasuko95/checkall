@@ -73,7 +73,22 @@ async function market(ca) {
   }
   const sup = await rpc('getTokenSupply', [ca]).catch(() => null);
   const supply = (sup && sup.value.uiAmount) || (tp && tp.marketCap && tp.priceUsd ? tp.marketCap / Number(tp.priceUsd) : null);
-  return { solUsd, supply, priceSol: tp && solUsd ? Number(tp.priceUsd) / solUsd : null };
+  return { solUsd, supply, priceSol: tp && solUsd ? Number(tp.priceUsd) / solUsd : null,
+    pairs: Array.isArray(dex) ? dex.slice(0, 3).map(p => p.pairAddress).filter(Boolean) : [] };
+}
+
+async function walk(addr, t0, maxPages) { // all successful signatures of one account, newest -> oldest
+  let before, out = [], done = false;
+  for (let i = 0; i < maxPages; i++) {
+    if (Date.now() - t0 > 50000) break; // stay inside the function time limit
+    if (i) await sleep(100); // stay under the free plan request rate
+    const r = await rpc('getSignaturesForAddress', [addr, Object.assign({ limit: 1000 }, before ? { before } : {})]);
+    if (!r.length) { done = true; break; }
+    r.forEach(x => { if (!x.err) out.push({ s: x.signature, t: x.slot }); });
+    before = r[r.length - 1].signature;
+    if (r.length < 1000) { done = true; break; }
+  }
+  return { out, done };
 }
 
 async function enhanced(key, sigs) {
@@ -106,22 +121,31 @@ module.exports = async (req, res) => {
     const ca = String(req.query.ca || '').trim(); // list all signatures, oldest first
     if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(ca)) return res.status(400).json({ error: 'Invalid token address.' });
     const m = await market(ca);
-    // Walk the whole history (newest -> oldest, 1000 per call), then keep the OLDEST 20,000 successful ones.
     const t0 = Date.now();
-    let before, all = [], cutoff = true;
-    for (let i = 0; i < 120; i++) {
-      if (Date.now() - t0 > 50000) break; // stay inside the function time limit
-      if (i) await sleep(100); // stay under the free plan request rate
-      const r = await rpc('getSignaturesForAddress', [ca, Object.assign({ limit: 1000 }, before ? { before } : {})]);
-      if (!r.length) { cutoff = false; break; }
-      r.forEach(x => { if (!x.err) all.push(x.signature); });
-      before = r[r.length - 1].signature;
-      if (r.length < 1000) { cutoff = false; break; }
+    // Read the small accounts instead of the huge mint history: the pump.fun bonding curve (early phase) and the pools.
+    const accts = [];
+    try {
+      const { PublicKey } = require('@solana/web3.js');
+      accts.push(PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), new PublicKey(ca).toBuffer()], new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'))[0].toBase58());
+    } catch (e) { /* web3.js not installed: pools only */ }
+    (m.pairs || []).forEach(a => { if (a && !accts.includes(a)) accts.push(a); });
+    if (!accts.length) accts.push(ca);
+    const seen = new Map();
+    let allDone = true;
+    for (let k = 0; k < accts.length; k++) {
+      const w = await walk(accts[k], t0, k === 0 ? 80 : 60);
+      w.out.forEach(x => seen.set(x.s, x.t));
+      if (!w.done) allDone = false;
     }
-    all.reverse();
+    if (!seen.size && accts[0] !== ca) { // nothing on those accounts: read the mint itself
+      const w = await walk(ca, t0, 120);
+      w.out.forEach(x => seen.set(x.s, x.t));
+      allDone = w.done;
+    }
+    let all = Array.from(seen.entries()).sort((a, b) => a[1] - b[1]).map(x => x[0]);
     const total = all.length;
-    if (all.length > 20000) all = all.slice(0, 20000);
-    res.status(200).json({ sigs: all, total, cutoff, market: m });
+    if (all.length > 30000) all = all.slice(0, 30000);
+    res.status(200).json({ sigs: all, total, cutoff: !allDone, market: m });
   } catch (e) {
     res.status(500).json({ error: 'Something went wrong: ' + e.message });
   }
