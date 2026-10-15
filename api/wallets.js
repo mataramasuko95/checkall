@@ -2,15 +2,23 @@
 const WSOL = 'So11111111111111111111111111111111111111112';
 const MAX_PAGES = 10, MIN_USD = 5;
 
+const sleep = (ms) => new Promise(z => setTimeout(z, ms));
 async function rpc(method, params) {
-  const r = await fetch('https://mainnet.helius-rpc.com/?api-key=' + process.env.HELIUS_API_KEY, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
-  });
-  const j = await r.json();
-  if (j.error) throw new Error(j.error.message);
-  return j.result;
+  for (let t = 0; t < 6; t++) {
+    const r = await fetch('https://mainnet.helius-rpc.com/?api-key=' + process.env.HELIUS_API_KEY, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
+    });
+    if (r.status === 429) { await sleep(600 * (t + 1)); continue; } // rate limited: wait and retry
+    const txt = await r.text();
+    let j;
+    try { j = JSON.parse(txt); } catch (e) { throw new Error('Helius answered ' + r.status + ': ' + txt.slice(0, 80)); }
+    if (j.error) throw new Error(j.error.message);
+    return j.result;
+  }
+  throw new Error('Helius rate limit reached. Wait a minute and try again.');
 }
+
 async function getJson(url) { try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch (e) { return null; } }
 const sum = (a) => a.reduce((x, t) => x + Number(t.tokenAmount), 0);
 
@@ -102,7 +110,8 @@ module.exports = async (req, res) => {
     const t0 = Date.now();
     let before, all = [], cutoff = true;
     for (let i = 0; i < 120; i++) {
-      if (Date.now() - t0 > 45000) break; // stay inside the function time limit
+      if (Date.now() - t0 > 50000) break; // stay inside the function time limit
+      if (i) await sleep(100); // stay under the free plan request rate
       const r = await rpc('getSignaturesForAddress', [ca, Object.assign({ limit: 1000 }, before ? { before } : {})]);
       if (!r.length) { cutoff = false; break; }
       r.forEach(x => { if (!x.err) all.push(x.signature); });
