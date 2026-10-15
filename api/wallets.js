@@ -64,7 +64,7 @@ function handle(tx, mint, W) {
   if (tx.transactionError) return;
   const tt = (tx.tokenTransfers || []).filter(t => t.mint === mint && Number(t.tokenAmount) > 0);
   if (!tt.length) return;
-  const get = (a) => W[a] || (W[a] = { w: a, spent: 0, recv: 0, bought: 0, sold: 0, buys: 0, sells: 0, tin: 0, tout: 0 });
+  const get = (a) => W[a] || (W[a] = { w: a, spent: 0, recv: 0, bought: 0, sold: 0, buys: 0, sells: 0, tin: 0, tout: 0, alt: 0 });
   const tr = tx.feePayer;
   const tin = sum(tt.filter(t => t.toUserAccount === tr)), tout = sum(tt.filter(t => t.fromUserAccount === tr));
   let paid = 0, got = 0;
@@ -84,6 +84,9 @@ function handle(tx, mint, W) {
   }
   const dir = tin > tout ? 'buy' : tout > tin ? 'sell' : null;
   const amt = dir === 'buy' ? paid - got : dir === 'sell' ? got - paid : 0;
+  // the trader paid or got paid in some other token (not SOL): the SOL maths cannot be trusted for this wallet
+  const other = (tx.tokenTransfers || []).some(t => t.mint !== mint && t.mint !== WSOL && Number(t.tokenAmount) > 0 && (t.fromUserAccount === tr || t.toUserAccount === tr));
+  if (other) { get(tr).alt++; if (!(dir && amt > 0)) return; }
   if (dir && amt > 0) {
     const w = get(tr);
     if (dir === 'buy') { w.spent += amt; w.bought += tin - tout; w.buys++; }
@@ -118,8 +121,8 @@ async function market(ca) {
 async function walk(addr, t0, maxPages) { // all successful signatures of one account, newest -> oldest
   let before, out = [], done = false;
   for (let i = 0; i < maxPages; i++) {
-    if (Date.now() - t0 > 50000) break; // stay inside the function time limit
-    if (i) await sleep(100); // stay under the free plan request rate
+    if (Date.now() - t0 > 52000) break; // stay inside the function time limit
+    if (i) await sleep(30); // stay under the free plan request rate
     const r = await rpc('getSignaturesForAddress', [addr, Object.assign({ limit: 1000 }, before ? { before } : {})]);
     if (!r.length) { done = true; break; }
     r.forEach(x => { if (!x.err) out.push({ s: x.signature, t: x.slot }); });
@@ -175,7 +178,7 @@ module.exports = async (req, res) => {
     const seen = new Map();
     let allDone = true;
     for (let k = 0; k < accts.length; k++) {
-      const w = await walk(accts[k], t0, k === 0 ? 80 : 60);
+      const w = await walk(accts[k], t0, k === 0 ? 80 : 150);
       w.out.forEach(x => seen.set(x.s, x.t));
       sources.push({ kind: k === 0 && curveOk ? 'curve' : 'pool', count: w.out.length, done: w.done, exists: k === 0 && curveOk ? curveExists : true });
       if (!w.done) allDone = false;
