@@ -123,9 +123,11 @@ module.exports = async (req, res) => {
     const m = await market(ca);
     const t0 = Date.now();
     // Read the small accounts instead of the huge mint history: the pump.fun bonding curve (early phase) and the pools.
-    const accts = [];
+    const accts = [], sources = [];
+    let curveOk = false;
     try {
       const { PublicKey } = require('@solana/web3.js');
+      curveOk = true;
       accts.push(PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), new PublicKey(ca).toBuffer()], new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'))[0].toBase58());
     } catch (e) { /* web3.js not installed: pools only */ }
     (m.pairs || []).forEach(a => { if (a && !accts.includes(a)) accts.push(a); });
@@ -135,17 +137,19 @@ module.exports = async (req, res) => {
     for (let k = 0; k < accts.length; k++) {
       const w = await walk(accts[k], t0, k === 0 ? 80 : 60);
       w.out.forEach(x => seen.set(x.s, x.t));
+      sources.push({ kind: k === 0 && curveOk ? 'curve' : 'pool', count: w.out.length, done: w.done });
       if (!w.done) allDone = false;
     }
-    if (!seen.size && accts[0] !== ca) { // nothing on those accounts: read the mint itself
+    if (seen.size < 500 && !accts.includes(ca)) { // suspiciously little found: also read the mint itself
       const w = await walk(ca, t0, 120);
       w.out.forEach(x => seen.set(x.s, x.t));
-      allDone = w.done;
+      sources.push({ kind: 'mint', count: w.out.length, done: w.done });
+      if (w.done) allDone = true;
     }
     let all = Array.from(seen.entries()).sort((a, b) => a[1] - b[1]).map(x => x[0]);
     const total = all.length;
     if (all.length > 30000) all = all.slice(0, 30000);
-    res.status(200).json({ sigs: all, total, cutoff: !allDone, market: m });
+    res.status(200).json({ sigs: all, total, cutoff: !allDone, sources, market: m });
   } catch (e) {
     res.status(500).json({ error: 'Something went wrong: ' + e.message });
   }
