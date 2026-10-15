@@ -114,5 +114,3 @@ module.exports = async (req, res) => {
   }
 };
 module.exports.handle = handle;
-
-module.exports.summarize = summarize;
