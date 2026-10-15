@@ -98,17 +98,21 @@ module.exports = async (req, res) => {
     const ca = String(req.query.ca || '').trim(); // list all signatures, oldest first
     if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(ca)) return res.status(400).json({ error: 'Invalid token address.' });
     const m = await market(ca);
-    let before, all = [], cutoff = false;
-    for (let i = 0; i < 30; i++) {
+    // Walk the whole history (newest -> oldest, 1000 per call), then keep the OLDEST 20,000 successful ones.
+    const t0 = Date.now();
+    let before, all = [], cutoff = true;
+    for (let i = 0; i < 120; i++) {
+      if (Date.now() - t0 > 45000) break; // stay inside the function time limit
       const r = await rpc('getSignaturesForAddress', [ca, Object.assign({ limit: 1000 }, before ? { before } : {})]);
-      if (!r.length) break;
+      if (!r.length) { cutoff = false; break; }
       r.forEach(x => { if (!x.err) all.push(x.signature); });
       before = r[r.length - 1].signature;
-      if (r.length < 1000) break;
-      if (i === 29) cutoff = true;
+      if (r.length < 1000) { cutoff = false; break; }
     }
     all.reverse();
-    res.status(200).json({ sigs: all, cutoff, market: m });
+    const total = all.length;
+    if (all.length > 20000) all = all.slice(0, 20000);
+    res.status(200).json({ sigs: all, total, cutoff, market: m });
   } catch (e) {
     res.status(500).json({ error: 'Something went wrong: ' + e.message });
   }
