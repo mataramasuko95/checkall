@@ -2,6 +2,44 @@
 const WSOL = 'So11111111111111111111111111111111111111112';
 const MAX_PAGES = 10, MIN_USD = 5;
 
+const crypto = require('crypto');
+// pump.fun bonding curve address, computed without any library (checked against a real token)
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const P = (1n << 255n) - 19n;
+const pw = (b, e) => { let r = 1n; b %= P; while (e > 0n) { if (e & 1n) r = r * b % P; b = b * b % P; e >>= 1n; } return r; };
+const inv = (a) => pw(a, P - 2n);
+const D = ((P - 121665n) * inv(121666n)) % P;
+function b58dec(s) {
+  let n = 0n;
+  for (const c of s) { const i = B58.indexOf(c); if (i < 0) throw new Error('bad base58'); n = n * 58n + BigInt(i); }
+  let hex = n.toString(16); if (hex.length % 2) hex = '0' + hex;
+  let bytes = n === 0n ? [] : Array.from(Buffer.from(hex, 'hex'));
+  let z = 0; while (z < s.length && s[z] === '1') z++;
+  return Buffer.from(Array(z).fill(0).concat(bytes));
+}
+function b58enc(buf) {
+  let n = 0n; for (const b of buf) n = (n << 8n) | BigInt(b);
+  let s = ''; while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n; }
+  let z = 0; while (z < buf.length && buf[z] === 0) z++;
+  return '1'.repeat(z) + s;
+}
+function onCurve(buf) { // is this 32-byte value a valid ed25519 public key?
+  let y = 0n; for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(buf[i]);
+  y &= (1n << 255n) - 1n;
+  if (y >= P) return false;
+  const y2 = y * y % P, u = (y2 - 1n + P) % P, v = (D * y2 + 1n) % P;
+  if (u === 0n) return true;
+  return pw(u * inv(v) % P, (P - 1n) / 2n) === 1n;
+}
+function findPda(seeds, programId) {
+  const pid = b58dec(programId);
+  for (let bump = 255; bump >= 0; bump--) {
+    const h = crypto.createHash('sha256').update(Buffer.concat([...seeds, Buffer.from([bump]), pid, Buffer.from('ProgramDerivedAddress')])).digest();
+    if (!onCurve(h)) return b58enc(h);
+  }
+  throw new Error('no PDA');
+}
+
 const sleep = (ms) => new Promise(z => setTimeout(z, ms));
 async function rpc(method, params) {
   for (let t = 0; t < 6; t++) {
@@ -126,13 +164,12 @@ module.exports = async (req, res) => {
     const accts = [], sources = [];
     let curveOk = false, curveExists = false;
     try {
-      const { PublicKey } = require('@solana/web3.js');
+      const curveAddr = findPda([Buffer.from('bonding-curve'), b58dec(ca)], '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
       curveOk = true;
-      const curveAddr = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), new PublicKey(ca).toBuffer()], new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'))[0].toBase58();
       accts.push(curveAddr);
       const ci = await rpc('getAccountInfo', [curveAddr, { encoding: 'base64' }]).catch(() => null);
       curveExists = !!(ci && ci.value);
-    } catch (e) { /* web3.js not installed: pools only */ }
+    } catch (e) { /* could not derive the curve address */ }
     (m.pairs || []).forEach(a => { if (a && !accts.includes(a)) accts.push(a); });
     if (!accts.length) accts.push(ca);
     const seen = new Map();
