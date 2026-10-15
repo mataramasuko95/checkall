@@ -124,11 +124,14 @@ module.exports = async (req, res) => {
     const t0 = Date.now();
     // Read the small accounts instead of the huge mint history: the pump.fun bonding curve (early phase) and the pools.
     const accts = [], sources = [];
-    let curveOk = false;
+    let curveOk = false, curveExists = false;
     try {
       const { PublicKey } = require('@solana/web3.js');
       curveOk = true;
-      accts.push(PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), new PublicKey(ca).toBuffer()], new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'))[0].toBase58());
+      const curveAddr = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'), new PublicKey(ca).toBuffer()], new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'))[0].toBase58();
+      accts.push(curveAddr);
+      const ci = await rpc('getAccountInfo', [curveAddr, { encoding: 'base64' }]).catch(() => null);
+      curveExists = !!(ci && ci.value);
     } catch (e) { /* web3.js not installed: pools only */ }
     (m.pairs || []).forEach(a => { if (a && !accts.includes(a)) accts.push(a); });
     if (!accts.length) accts.push(ca);
@@ -137,7 +140,7 @@ module.exports = async (req, res) => {
     for (let k = 0; k < accts.length; k++) {
       const w = await walk(accts[k], t0, k === 0 ? 80 : 60);
       w.out.forEach(x => seen.set(x.s, x.t));
-      sources.push({ kind: k === 0 && curveOk ? 'curve' : 'pool', count: w.out.length, done: w.done });
+      sources.push({ kind: k === 0 && curveOk ? 'curve' : 'pool', count: w.out.length, done: w.done, exists: k === 0 && curveOk ? curveExists : true });
       if (!w.done) allDone = false;
     }
     if (seen.size < 500 && !accts.includes(ca)) { // suspiciously little found: also read the mint itself
