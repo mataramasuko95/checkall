@@ -85,7 +85,16 @@ function handle(tx, mint, W) {
   const dir = tin > tout ? 'buy' : tout > tin ? 'sell' : null;
   const amt = dir === 'buy' ? paid - got : dir === 'sell' ? got - paid : 0;
   // the trader paid or got paid in some other token (not SOL): the SOL maths cannot be trusted for this wallet
-  const other = (tx.tokenTransfers || []).some(t => t.mint !== mint && t.mint !== WSOL && Number(t.tokenAmount) > 0 && (t.fromUserAccount === tr || t.toUserAccount === tr));
+  const flow = {};
+  (tx.tokenTransfers || []).forEach(t => {
+    const q = Number(t.tokenAmount);
+    if (t.mint === mint || t.mint === WSOL || !(q > 0)) return;
+    const f = flow[t.mint] || (flow[t.mint] = { net: 0, tot: 0 });
+    if (t.toUserAccount === tr) { f.net += q; f.tot += q; }
+    if (t.fromUserAccount === tr) { f.net -= q; f.tot += q; }
+  });
+  // routing hops cancel out (net is about 0); a real payment in another token leaves a net change
+  const other = Object.keys(flow).some(k => flow[k].tot > 0 && Math.abs(flow[k].net) > 0.01 * flow[k].tot);
   if (other) { get(tr).alt++; if (!(dir && amt > 0)) return; }
   if (dir && amt > 0) {
     const w = get(tr);
