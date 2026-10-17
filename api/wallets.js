@@ -153,12 +153,42 @@ async function enhanced(key, sigs) {
   throw new Error('Helius rate limit reached. Try again in a moment.');
 }
 
+const ATA_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
+// Complete trade history of a few wallets for this token, read from each wallet's own token account
+async function walletHistories(key, ca, wallets) {
+  const mi = await rpc('getAccountInfo', [ca, { encoding: 'base64' }]);
+  const prog = (mi && mi.value && mi.value.owner) || 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+  const sigs = new Set(), heavy = [], ok = [];
+  for (const w of wallets) {
+    const ata = findPda([b58dec(w), b58dec(prog), b58dec(ca)], ATA_PROGRAM);
+    const r = await rpc('getSignaturesForAddress', [ata, { limit: 200 }]);
+    if (r.length >= 200) { heavy.push(w); continue; } // hundreds of trades: bot-like, skip
+    if (!r.length) continue;
+    ok.push(w);
+    r.forEach(x => { if (!x.err) sigs.add(x.signature); });
+    await sleep(30);
+  }
+  const all = {}, list = Array.from(sigs);
+  for (let i = 0; i < list.length; i += 100) {
+    const txs = await enhanced(key, list.slice(i, i + 100));
+    (Array.isArray(txs) ? txs : []).forEach(tx => handle(tx, ca, all));
+  }
+  const W = {};
+  ok.forEach(w => { W[w] = all[w] || { w, spent: 0, recv: 0, bought: 0, sold: 0, buys: 0, sells: 0, tin: 0, tout: 0, alt: 0 }; });
+  return { W, heavy };
+}
+
 module.exports = async (req, res) => {
   const key = process.env.HELIUS_API_KEY;
   if (!key) return res.status(500).json({ error: 'HELIUS_API_KEY is not set in Vercel.' });
   try {
     if (req.method === 'POST') { // parse one batch of signatures (max 300)
       const b = req.body || {};
+      if (Array.isArray(b.wallets)) {
+        const okAddr = (x) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(x || ''));
+        if (!okAddr(b.ca)) return res.status(400).json({ error: 'Bad request.' });
+        return res.status(200).json(await walletHistories(key, b.ca, b.wallets.slice(0, 6).filter(okAddr)));
+      }
       const sigs = Array.isArray(b.sigs) ? b.sigs.slice(0, 300) : [];
       if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(b.ca || '')) || !sigs.length) return res.status(400).json({ error: 'Bad request.' });
       const W = {};
